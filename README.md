@@ -531,3 +531,26 @@ python s05-skill-loading.py
 2. Load the agent-builder skill and follow its instructions
 3. I need to do a code review -- load the relevant skill first
 4. Build an MCP server using the mcp-builder skill
+
+# s07 - Tasks
+
+Task Graph + Dependencies
+
+> A file-based task graph with ordering, parallelism, and dependencies -- the coordination backbone for multi-agent work
+
+```
+.tasks/tasks.json
+Persisted to disk -- survives context compaction
+```
+
+> "Break big goals into small tasks, order them, persist to disk" -- a file-based task graph with dependencies, laying the foundation for multi-agent collaboration.
+
+## Problem
+
+s03's ToDoManager is a flat checklist in memory: no ordering, no dependencies, no status beyond done-or-not.
+Real goals have structure -- task B depends on task A, task C and task D can run in parallel, task E waits for both C and D.
+
+Without explicit realtionships, the agent can't tell what's ready, what's blocked, or what can run concurrently. And 
+because the list lives only in memory, context compression (s06) wipes it clean.
+
+## Solution

@@ -554,3 +554,112 @@ Without explicit realtionships, the agent can't tell what's ready, what's blocke
 because the list lives only in memory, context compression (s06) wipes it clean.
 
 ## Solution
+
+Promote the checklist into a **task graph** persisted to disk. Each task is a JSON file with status, dependencies (`blockedBy`), and dependents (`blocks`). The graph answers three questions at any moment:
+
+What's ready? -- tasks with `pending` status and empty `blockedBy`.
+What's blocked? -- tasks waiting on unfinished dependencies.
+What's done? -- `completed` tasks, whose completion automatically unblocks dependents.
+
+```
+.tasks/
+  task_1.json  {"id":1, "status":"completed"}
+  task_2.json  {"id":2, "blockedBy":[1], "status":"pending"}
+  task_3.json  {"id":3, "blockedBy":[1], "status":"pending"}
+  task_4.json  {"id":4, "blockedBy":[2,3], "status":"pending"}
+
+Task graph (DAG):
+                 +----------+
+            +--> | task 2   | --+
+            |    | pending  |   |
++----------+     +----------+    +--> +----------+
+| task 1   |                          | task 4   |
+| completed| --> +----------+    +--> | blocked  |
++----------+     | task 3   | --+     +----------+
+                 | pending  |
+                 +----------+
+
+Ordering:     task 1 must finish before 2 and 3
+Parallelism:  tasks 2 and 3 can run at the same time
+Dependencies: task 4 waits for both 2 and 3
+Status:       pending -> in_progress -> completed
+```
+
+This task graph becomes the coordination backbone for everything after s07: background execution (s08), multi-agent teams (s09+), and worktree isolation (s12) all read from and write to this same structure.
+
+## How It Works
+
+1. **TaskManager**: one JSON file per task, CRUD with dependency graph.
+
+```python
+class TaskManager:
+    def __init__(self, tasks_dir: Path):
+        self.dir = tasks_dir
+        self.dir_mkdir(exist_ok=True)
+        self._next_id = self._max_id() + 1
+        
+    def create(self, subject, description=""):
+        task = {"id": self._next_id, "subject": subject, "status": "pending", "blockedBy": [], "blocks": [], "owner": ""}
+        self._save(task)
+        self._next_id += 1
+        return json.dumps(task, indent=2)
+```
+
+2. **Dependency resolution**: completing a task clears its ID from every other tasks's `blockBy` list, automatically unblocking dependents.
+
+```python
+def _clear_denpendency(self, completed_id):
+    for f in self.dir.glob("task_*.json"):
+        task = json.loads(f.read_text())
+        if completed_id in task.get("blocledBy", []):
+            task["blockedBy"].remove(completed_id)
+            self._save(task)
+```
+
+3. **Status + depedency wiring**: `update` handles transitions and dependency edges.
+
+```python
+def update(self, task_id, status=None, add_blocked_by=None, add_blocks=None):
+    task = self._load(task_id)
+    if status:
+        task["status"] = status
+        if status == "completed":
+            self._clear_dependency(task_id)
+    self._save(task)
+```
+
+4. Four task tools go into the dispatch map.
+
+```python
+TOOL_HANDLERS = {
+    # ...base tools...
+    "task_create": lambda **kw: TASKS.create(kw["subject"]),
+    "task_update": lambda **kw: TASKS.update(kw["task_id"], kw.get("status")),
+    "task_list":   lambda **kw: TASKS.list_all(),
+    "task_get":    lambda **kw: TASKS.get(kw["task_id"]),
+}
+```
+
+From s07 onward, the task graph is the default for multi-step work. s03's Todo remains for quick single-session checklists.
+
+## What Changed From s06
+
+| COMPONENT	      | BEFORE (S06)                |	AFTER (S07)                              |
+|-----------------|-----------------------------|------------------------------------------|
+| Tools	          | 5	                          | 8 (`task_create/update/list/get`)        |
+| Planning model	| Flat checklist (in-memory)	| Task graph with dependencies (on disk)   |
+| Relationships	  | None	                      | `blockedBy` + `blocks` edges             |
+| Status tracking	| Done or not	                | `pending` -> `in_progress` -> `completed`|
+| Persistence	    | Lost on compression         |	Survives compression and restarts        |
+
+## Try It
+
+```bash
+cd learn-claude-code
+python s07-task-system.py
+```
+
+1. Create 3 tasks: "Setup project", "Write code", "Write tests". Make them depend on each other in order.
+2. List all tasks and show the dependency graph
+3. Complete task 1 and then list tasks to see task 2 unblocked
+4. Create a task board for refactoring: parse -> transform -> emit -> test, where transform and emit can run in parallel after parse

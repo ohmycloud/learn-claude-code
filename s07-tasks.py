@@ -80,7 +80,7 @@ class TaskManager:
             task["status"] = status
         # When a task is completed, removed it from all other task's blockedBy
         if status == "completed":
-            self.clear_dependency(task_id)
+            self._clear_dependency(task_id)
 
         if add_blocked_by:
             task["blockedBy"] = list(set(task["blockedBy"] + add_blocked_by))

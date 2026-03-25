@@ -313,7 +313,7 @@ The "one in_progress at a time" constraint forces sequential focus. The nag remi
 
 ```bash
 cd learn-claude-code
-python s03-todo-write.py
+uv run python s03-todo-write.py
 ```
 
 1. Refactor the file hello.py: add type hints, docstrings, and a main guard
@@ -406,7 +406,7 @@ The child's entire message history (possibly 30+ tool calls) is discarded. The p
 
 ```bash
 cd learn-claude-code
-python s04-subagent.py
+uv run python s04-subagent.py
 ```
 
 1. Use a subtask to find what testing framework this project uses
@@ -524,7 +524,7 @@ The model learns what skills exist (cheap) and loads them when relevant (expensi
 
 ```bash
 cd learn-claude-code
-python s05-skill-loading.py
+uv run python s05-skill-loading.py
 ```
 
 1. What skills are available?
@@ -656,7 +656,7 @@ From s07 onward, the task graph is the default for multi-step work. s03's Todo r
 
 ```bash
 cd learn-claude-code
-python s07-task-system.py
+uv run python s07-task-system.py
 ```
 
 1. Create 3 tasks: "Setup project", "Write code", "Write tests". Make them depend on each other in order.
@@ -788,9 +788,119 @@ Transcripts preserve full history on disk, Nothing is truly lost -- just moved o
 
 ```bash
 cd learn-claude-code
-python s06-context-compact.py
+uv run python s06-context-compact.py
 ```
 
 1. Read every Python file in the agents/ directory one by one (watch micro-compact replace old results)
 2. Keep reading files until compression triggers automatically
 3. Use the compact tool to manually compress the conversation
+
+# s08 - Background Tasks
+
+Background Threads + Notifications
+
+> Run slow operations in the background; the agent keeps thinking ahead
+
+"Run slow operations in the background; the agent keeps thinking" -- daemon threads run commands, inject notifications on completion.
+
+## Problem
+
+Some commands take minutes: `npm install`, `pytest`, `docker build`. With a blocking loop, the model sits idle waiting.
+If the user asks "install dependencies and while that runs, create the config file", the agent does them sequentially, not in parallel.
+
+## Solution
+
+```
+Main thread                Background thread
++-----------------+        +-----------------+
+| agent loop      |        | subprocess runs |
+| ...             |        | ...             |
+| [LLM call] <---+------- | enqueue(result) |
+|  ^drain queue   |        +-----------------+
++-----------------+
+
+Timeline:
+Agent --[spawn A]--[spawn B]--[other work]----
+             |          |
+             v          v
+          [A runs]   [B runs]      (parallel)
+             |          |
+             +-- results injected before next LLM call --+
+```
+
+## How It Works
+
+1. BackgroundManager tracks tasks with a thread-safe notification queue.
+
+```python
+class BackgroundManager:
+    def __init__(self):
+        self.tasks = {}
+        self._notification_queue []
+        self._lock = threading.Lock()
+```
+
+2. `run()` starts a deamon thread and returns immediately.
+
+```python
+def run(self, command: str) -> str:
+    task_id = str(uuid.uuid4())[:8]
+    self.tasks[task_id] = {"status": "running", "command": command}
+    thread = threading.Thread(
+        target=self._execute, args=(task_id, command), deamon=True
+    )
+    thread.start()
+    return f"Background task {task_id} started"
+```
+
+3. When the subprocess finishes, its result goes into the notification queue.
+
+```python
+def _execute(self, task_id, command):
+    try:
+        r = subprocess.run(command, shell=True, cwd=WORKDIR, capture_output=True, text=True, timeout=300)
+        output = (r.stdout + r.stderr).strip()[:50000]
+    except subprocess.TimeoutExpired:
+        output = "Error: Timeout (300s)"
+    with self._lock:
+        self._notification_queue.append({
+            "task_id": task_id, "result": output[:500]
+        })
+```
+
+4. The agent loop drains notifications before each LLM call:
+
+```python
+def agent_loop(messages: list):
+    while True:
+        notifs = BG.drain_notifications()
+        if notifs:
+            notif_text = "\n".join(
+                f"[bg:{n['task_id']}] {n['result']}" for n in notifs
+            )
+            messages.append({"role": "user", "content": f"<background-results>\n{notif_text}\n</background-results>"})
+            messages.append({"role": "assistant", "content": "Noted background results."})
+        response = client.messages.create(...)
+```
+
+The loop stays single-threaded. Only subprocess I/O is parallelized.
+
+## What Changed From s07
+
+| COMPONENT	    | BEFORE (S07)	| AFTER (S08)                       |
+|---------------|---------------|-----------------------------------|
+| Tools	        | 8	            | 6 (base + background_run + check) |
+| Execution	    | Blocking only	| Blocking + background threads     |
+| Notification	| None	        | Queue drained per loop            |
+| Concurrency	  | None	        | Daemon threads                    |
+
+## Try It
+
+```
+cd learn-claude-code
+uv run python s08-background-tasks.py
+```
+
+1. Run "sleep 5 && echo done" in the background, then create a file while it runs
+2. Start 3 background tasks: "sleep 2", "sleep 4", "sleep 6". Check their status.
+3. Run pytest in the background and keep working on other things

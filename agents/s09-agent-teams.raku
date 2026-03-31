@@ -95,7 +95,6 @@ class TeammateManager {
     }
 
     # ── private helpers ──────────────────────────────────────────────────────
-
     method !load-config(--> Hash) {
         $!config-path.e
             ?? from-json($!config-path.slurp)
@@ -111,7 +110,6 @@ class TeammateManager {
     }
 
     # ── exec: dispatch a tool call on behalf of a teammate ───────────────────
-
     method !exec(Str $sender, Str $tool-name, %args --> Str) {
         given $tool-name {
             when 'bash'         { run-bash(%args<command>) }
@@ -179,7 +177,6 @@ class TeammateManager {
     }
 
     # ── spawn: create or restart a teammate in its own thread ────────────────
-
     method spawn(Str $name, Str $role, Str $prompt --> Str) {
         my $member = self!find-member($name);
 
